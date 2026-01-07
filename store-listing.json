@@ -1,0 +1,37 @@
+{
+  "extension_name": "Glider",
+  "version": "1.0.0",
+  "author": "vd7",
+  "store_listing": {
+    "short_description": "Bridge browser tabs to local dev tools via Chrome DevTools Protocol. For developers building browser automation and testing tools.",
+    "detailed_description": "Glider connects your browser tabs to local development tools using the Chrome DevTools Protocol (CDP).\n\nDesigned for developers who need to:\n- Build browser automation scripts\n- Create testing frameworks\n- Debug web applications\n- Develop browser-based tooling\n\nHow it works:\n1. Click the Glider icon on any tab\n2. The tab connects to your local WebSocket server (localhost:19988)\n3. Send CDP commands from your local scripts\n\nRequires a local relay server running on port 19988. See documentation for setup.\n\nThis extension uses the debugger permission to access Chrome DevTools Protocol, enabling programmatic control of browser tabs for development and testing purposes.",
+    "category": "Developer Tools",
+    "language": "English"
+  },
+  "permission_justifications": {
+    "debugger": "Required to access Chrome DevTools Protocol (CDP) for browser automation. This enables developers to programmatically interact with web pages for testing, debugging, and building development tools. The extension only activates when the user explicitly clicks the extension icon on a tab.",
+    "tabs": "Required to identify which tab the user wants to connect. Used only to get tab ID and URL for the CDP connection.",
+    "activeTab": "Required to interact with the currently active tab when the user clicks the extension icon.",
+    "host_permissions_all_urls": "Required because developers may need to connect to any website during development and testing. The extension does not access any site data unless the user explicitly clicks to connect a tab."
+  },
+  "privacy_policy": {
+    "data_collection": "none",
+    "data_storage": "none", 
+    "data_sharing": "none",
+    "summary": "Glider does not collect, store, or transmit any user data. All communication occurs locally between the browser and localhost. No analytics, no tracking, no external servers."
+  },
+  "review_notes": "This is a developer tool for browser automation. It requires the debugger permission to access CDP, similar to tools like Puppeteer or Playwright. The extension only activates on user action (clicking the icon). All communication is local (localhost:19988). No data leaves the user's machine.",
+  "screenshots_needed": [
+    "Extension icon in toolbar",
+    "Badge showing connected tab count",
+    "Example terminal output from local script"
+  ],
+  "submission_checklist": [
+    "Create GitHub repo: github.com/vd7/glider",
+    "Add privacy policy page to repo README or GitHub Pages",
+    "Take 1280x800 screenshots",
+    "Create 440x280 promotional tile (optional)",
+    "Pay $5 developer registration fee (one-time)",
+    "Submit and wait for review (debugger permission = manual review, 1-3 days)"
+  ]
+}
