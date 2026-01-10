@@ -3,6 +3,35 @@ let ws = null;
 let connectedTabs = new Map();
 let nextSessionId = 1;
 
+// Create offscreen document to keep service worker alive
+async function setupOffscreen() {
+  try {
+    const hasDoc = await chrome.offscreen.hasDocument();
+    if (!hasDoc) {
+      await chrome.offscreen.createDocument({
+        url: 'offscreen.html',
+        reasons: ['BLOBS'],
+        justification: 'Keep service worker alive for persistent browser automation'
+      });
+    }
+  } catch (e) {
+    console.log('[glider] Offscreen setup:', e.message);
+  }
+}
+
+// Handle keepalive messages from offscreen document
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'keepalive') {
+    // Just receiving this keeps the worker alive
+    sendResponse({ ok: true });
+  }
+  return false;
+});
+
+// Setup offscreen on install/startup
+chrome.runtime.onInstalled.addListener(setupOffscreen);
+chrome.runtime.onStartup.addListener(setupOffscreen);
+
 function connect() {
   if (ws && ws.readyState === WebSocket.OPEN) return;
   
@@ -13,7 +42,14 @@ function connect() {
     return;
   }
   
-  ws.onopen = () => updateIcon();
+  ws.onopen = async () => {
+    console.log('[glider] WebSocket connected to relay');
+    updateIcon();
+    // Wait a bit for everything to settle
+    await new Promise(r => setTimeout(r, 500));
+    // AUTO-ATTACH: When relay connects, attach to active tab automatically
+    await autoAttachActiveTab();
+  };
   ws.onerror = () => {};
   ws.onclose = () => {
     ws = null;
@@ -28,6 +64,13 @@ function connect() {
     
     if (msg.method === 'ping') {
       ws.send(JSON.stringify({ method: 'pong' }));
+      return;
+    }
+    
+    // Command from relay to attach active tab
+    if (msg.method === 'attachActiveTab') {
+      await autoAttachActiveTab();
+      ws.send(JSON.stringify({ id: msg.id, result: { attached: connectedTabs.size } }));
       return;
     }
     
@@ -63,10 +106,13 @@ async function handleCDP({ method, params, sessionId }) {
 }
 
 async function attachTab(tabId) {
+  console.log('[glider] Attempting to attach tab:', tabId);
   try {
     await chrome.debugger.attach({ tabId }, '1.3');
+    console.log('[glider] Debugger attached to tab:', tabId);
   } catch (e) {
-    throw new Error('Could not attach to tab');
+    console.log('[glider] Attach failed:', e.message);
+    throw new Error('Could not attach to tab: ' + e.message);
   }
   
   try {
@@ -140,17 +186,81 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab.id || tab.url?.startsWith('chrome://') || tab.url?.startsWith('chrome-extension://')) return;
+  console.log('[glider] Extension icon clicked, tab:', tab?.id, tab?.url);
+  if (!tab.id || tab.url?.startsWith('chrome://') || tab.url?.startsWith('chrome-extension://')) {
+    console.log('[glider] Skipping chrome:// or extension page');
+    return;
+  }
   
   if (connectedTabs.has(tab.id)) {
+    console.log('[glider] Tab already connected, detaching');
     detachTab(tab.id);
   } else {
+    console.log('[glider] Connecting to relay and attaching tab');
     connect();
     try {
       await attachTab(tab.id);
-    } catch {}
+      console.log('[glider] Successfully attached tab');
+    } catch (e) {
+      console.log('[glider] Failed to attach:', e.message);
+    }
   }
 });
 
 connect();
+setupOffscreen();
 setInterval(() => { if (!ws || ws.readyState !== WebSocket.OPEN) connect(); }, 5000);
+
+// Keep service worker alive - Chrome suspends inactive workers
+chrome.alarms.create('keepalive', { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'keepalive') {
+    // Just accessing ws keeps the worker alive
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ method: 'ping' }));
+    }
+  }
+});
+
+// Auto-attach to active tab when relay connects
+async function autoAttachActiveTab() {
+  console.log('[glider] autoAttachActiveTab called');
+  try {
+    // Get ALL tabs, not just active ones
+    const tabs = await chrome.tabs.query({});
+    console.log('[glider] Found', tabs.length, 'total tabs');
+    
+    for (const tab of tabs) {
+      console.log('[glider] Checking tab:', tab.id, tab.url?.slice(0, 50));
+      if (tab && tab.id && !tab.url?.startsWith('chrome://') && !tab.url?.startsWith('chrome-extension://')) {
+        if (!connectedTabs.has(tab.id)) {
+          try {
+            await attachTab(tab.id);
+            console.log('[glider] Auto-attached to tab:', tab.url);
+            // Only attach first valid tab
+            return;
+          } catch (e) {
+            console.log('[glider] Failed to attach tab:', tab.id, e.message);
+          }
+        }
+      }
+    }
+    console.log('[glider] No valid tabs found to attach');
+  } catch (e) {
+    console.log('[glider] Auto-attach failed:', e.message);
+  }
+}
+
+// Also auto-attach when switching tabs (optional aggressive mode)
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  try {
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+    if (tab && !tab.url?.startsWith('chrome://') && !tab.url?.startsWith('chrome-extension://')) {
+      if (!connectedTabs.has(tab.id)) {
+        await attachTab(tab.id);
+        console.log('[glider] Auto-attached on tab switch:', tab.url);
+      }
+    }
+  } catch {}
+});

@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Glider",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Bridge browser tabs to local dev tools via Chrome DevTools Protocol. For developers building browser automation and testing tools.",
   "author": "vd7",
   "homepage_url": "https://github.com/vd7/glider",
   "permissions": [
     "debugger",
     "tabs",
-    "activeTab"
+    "activeTab",
+    "offscreen",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"
