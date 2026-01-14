@@ -89,16 +89,134 @@ function connect() {
 }
 
 async function handleCDP({ method, params, sessionId }) {
+  // Browser-level commands that don't need a tab/session
+  const browserLevelCommands = [
+    'Target.createTarget',
+    'Target.closeTarget',
+    'Target.activateTarget',
+    'Target.getTargets',
+    'Target.attachToTarget'
+  ];
+  
+  // For browser-level commands, handle without requiring a session
+  if (browserLevelCommands.includes(method)) {
+    if (method === 'Target.attachToTarget') {
+      // Find the tab by targetId and return its sessionId
+      const targetId = params?.targetId;
+      for (const [tid, info] of connectedTabs) {
+        if (info.targetId === targetId) {
+          return { sessionId: info.sessionId };
+        }
+      }
+      // If not found, try to attach to it
+      // This handles the case where the target was created but not yet tracked
+      throw new Error('Target not found: ' + targetId);
+    }
+    
+    if (method === 'Target.createTarget') {
+      // Create new tab (optionally in new window)
+      let tab;
+      if (params?.newWindow) {
+        // Create in new window - these tabs CAN be closed
+        const win = await chrome.windows.create({ url: params?.url || 'about:blank', focused: false });
+        tab = win.tabs[0];
+      } else {
+        tab = await chrome.tabs.create({ url: params?.url || 'about:blank', active: false });
+      }
+      await new Promise(r => setTimeout(r, 500));
+      
+      // Try to detach any existing debugger first
+      try {
+        await chrome.debugger.detach({ tabId: tab.id });
+      } catch (e) {
+        // Ignore - no debugger attached
+      }
+      
+      const { targetInfo } = await attachTab(tab.id);
+      return { targetId: targetInfo.targetId };
+    }
+    
+    if (method === 'Target.closeTarget') {
+      // Find tab by targetId and close it
+      const targetId = params?.targetId;
+      let foundTabId = null;
+      let foundWindowId = null;
+      for (const [tid, info] of connectedTabs) {
+        if (info.targetId === targetId) { foundTabId = tid; break; }
+      }
+      if (foundTabId) {
+        try {
+          // Get the window ID and tab count before closing
+          const tab = await chrome.tabs.get(foundTabId);
+          foundWindowId = tab.windowId;
+          
+          // Get window info to check tab count
+          const win = await chrome.windows.get(foundWindowId, { populate: true });
+          const isLastTab = win.tabs.length <= 1;
+          
+          // Detach debugger first
+          await chrome.debugger.detach({ tabId: foundTabId }).catch(() => {});
+          connectedTabs.delete(foundTabId);
+          
+          if (isLastTab) {
+            // Close entire window if this is the last tab
+            await chrome.windows.remove(foundWindowId);
+          } else {
+            // Just close the tab
+            await chrome.tabs.remove(foundTabId);
+          }
+          
+          // Notify relay
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              method: 'forwardCDPEvent',
+              params: {
+                method: 'Target.targetDestroyed',
+                params: { targetId }
+              }
+            }));
+          }
+          return { success: true };
+        } catch (e) {
+          throw new Error('Could not close tab: ' + e.message);
+        }
+      }
+      throw new Error('Target not found: ' + targetId);
+    }
+    
+    if (method === 'Target.activateTarget') {
+      // Bring tab to foreground
+      const targetId = params?.targetId;
+      let foundTabId = null;
+      for (const [tid, info] of connectedTabs) {
+        if (info.targetId === targetId) { foundTabId = tid; break; }
+      }
+      if (foundTabId) {
+        await chrome.tabs.update(foundTabId, { active: true });
+        const tab = await chrome.tabs.get(foundTabId);
+        if (tab.windowId) {
+          await chrome.windows.update(tab.windowId, { focused: true });
+        }
+        return { success: true };
+      }
+      throw new Error('Target not found: ' + targetId);
+    }
+    
+    if (method === 'Target.getTargets') {
+      return {
+        targetInfos: Array.from(connectedTabs.values()).map(info => ({
+          targetId: info.targetId,
+          type: 'page',
+          attached: true
+        }))
+      };
+    }
+  }
+  
+  // Session-scoped commands need a valid tab
   let tabId = null;
   for (const [tid, info] of connectedTabs) {
     if (info.sessionId === sessionId) { tabId = tid; break; }
-  }
-  
-  if (method === 'Target.createTarget') {
-    const tab = await chrome.tabs.create({ url: params?.url || 'about:blank', active: false });
-    await new Promise(r => setTimeout(r, 500));
-    const { targetInfo } = await attachTab(tab.id);
-    return { targetId: targetInfo.targetId };
   }
   
   if (!tabId) throw new Error('Session not found');
@@ -178,12 +296,29 @@ chrome.debugger.onEvent.addListener((src, method, params) => {
 });
 
 chrome.debugger.onDetach.addListener((src) => {
-  if (connectedTabs.has(src.tabId)) detachTab(src.tabId);
+  if (connectedTabs.has(src.tabId)) {
+    detachTab(src.tabId);
+    // Auto-reattach to another tab if we lost our only connection
+    ensureConnected();
+  }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (connectedTabs.has(tabId)) detachTab(tabId);
+  if (connectedTabs.has(tabId)) {
+    detachTab(tabId);
+    // Auto-reattach to another tab if we lost our only connection
+    ensureConnected();
+  }
 });
+
+// Ensure at least one tab is always connected
+async function ensureConnected() {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  if (connectedTabs.size > 0) return; // Already have a connection
+  
+  console.log('[glider] No tabs connected, auto-attaching...');
+  await autoAttachActiveTab();
+}
 
 chrome.action.onClicked.addListener(async (tab) => {
   console.log('[glider] Extension icon clicked, tab:', tab?.id, tab?.url);
@@ -209,7 +344,16 @@ chrome.action.onClicked.addListener(async (tab) => {
 
 connect();
 setupOffscreen();
-setInterval(() => { if (!ws || ws.readyState !== WebSocket.OPEN) connect(); }, 5000);
+
+// More aggressive reconnect - check every 3 seconds
+setInterval(() => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    connect();
+  } else if (connectedTabs.size === 0) {
+    // WebSocket is connected but no tabs - auto-attach
+    autoAttachActiveTab();
+  }
+}, 3000);
 
 // Keep service worker alive - Chrome suspends inactive workers
 chrome.alarms.create('keepalive', { periodInMinutes: 0.5 });
@@ -263,4 +407,35 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
       }
     }
   } catch {}
+});
+
+// Auto-attach when new tabs are created (if we have no connections)
+chrome.tabs.onCreated.addListener(async (tab) => {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  if (connectedTabs.size > 0) return; // Already have connections
+  
+  // Wait for tab to load
+  await new Promise(r => setTimeout(r, 1000));
+  
+  try {
+    const updatedTab = await chrome.tabs.get(tab.id);
+    if (updatedTab && !updatedTab.url?.startsWith('chrome://') && !updatedTab.url?.startsWith('chrome-extension://')) {
+      await attachTab(tab.id);
+      console.log('[glider] Auto-attached to new tab:', updatedTab.url);
+    }
+  } catch {}
+});
+
+// When a tab finishes loading, check if we need to attach
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete') return;
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  if (connectedTabs.size > 0) return; // Already have connections
+  
+  if (tab && !tab.url?.startsWith('chrome://') && !tab.url?.startsWith('chrome-extension://')) {
+    try {
+      await attachTab(tabId);
+      console.log('[glider] Auto-attached on tab load:', tab.url);
+    } catch {}
+  }
 });
