@@ -30,32 +30,30 @@
 
 ## 📝About
 
-Bridge Chrome tabs to local development tools via Chrome DevTools Protocol (CDP).
+Bridge Chrome tabs to local dev tools via Chrome DevTools Protocol (CDP).
 
 - **CDP relay** - Connects browser to local WebSocket server
 - **Tab control** - Attach/detach debugger to any tab
 - **Auto-reconnect** - Survives relay restarts
 - **Persistent** - Offscreen document keeps service worker alive
 
-Designed to work with [glidercli](https://github.com/vdutts7/glidercli) for terminal-based browser automation.
+Designed to work with [glidercli](https://github.com/vdutts7/glidercli) for **terminal-based browser automation**
 
 ## 💻Install
 
 ### Chrome Web Store (Recommended)
-*Pending approval*
+[Get Glider Chrome extension here for free](https://chromewebstore.google.com/detail/glider/njbidokkffhgpofcejgcfcgcinmeoalj?hl=en-US)
 
 ### Manual Install
 1. Clone this repo
-2. Go to `chrome://extensions`
-3. Enable "Developer mode"
-4. Click "Load unpacked"
+2. Go to `chrome://extensions` > Enable "Developer mode" > Click "Load unpacked"
 5. Select this folder
 
 ## 🚀Usage
 
 1. Install [glidercli](https://github.com/vdutts7/glidercli): `npm i -g glidercli`
 2. Start relay: `glider install`
-3. Click extension icon on any tab
+3. Click extension icon (any tab)
 4. Use CLI commands: `glider eval "document.title"`
 
 ### Extension Icon States
