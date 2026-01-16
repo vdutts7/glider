@@ -4,19 +4,28 @@ let connectedTabs = new Map();
 let nextSessionId = 1;
 
 // Create offscreen document to keep service worker alive
+let offscreenCreating = null;
 async function setupOffscreen() {
-  try {
-    const hasDoc = await chrome.offscreen.hasDocument();
-    if (!hasDoc) {
-      await chrome.offscreen.createDocument({
-        url: 'offscreen.html',
-        reasons: ['BLOBS'],
-        justification: 'Keep service worker alive for persistent browser automation'
-      });
+  if (offscreenCreating) return offscreenCreating;
+  
+  offscreenCreating = (async () => {
+    try {
+      const hasDoc = await chrome.offscreen.hasDocument();
+      if (!hasDoc) {
+        await chrome.offscreen.createDocument({
+          url: 'offscreen.html',
+          reasons: ['BLOBS'],
+          justification: 'Keep service worker alive for persistent browser automation'
+        });
+      }
+    } catch (e) {
+      console.log('[glider] Offscreen setup:', e.message);
+    } finally {
+      offscreenCreating = null;
     }
-  } catch (e) {
-    console.log('[glider] Offscreen setup:', e.message);
-  }
+  })();
+  
+  return offscreenCreating;
 }
 
 // Handle keepalive messages from offscreen document
@@ -25,7 +34,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Just receiving this keeps the worker alive
     sendResponse({ ok: true });
   }
-  return false;
+  return true; // Keep channel open for async response
 });
 
 // Setup offscreen on install/startup
@@ -343,7 +352,7 @@ chrome.action.onClicked.addListener(async (tab) => {
 });
 
 connect();
-setupOffscreen();
+// setupOffscreen called via onInstalled/onStartup listeners
 
 // More aggressive reconnect - check every 3 seconds
 setInterval(() => {
