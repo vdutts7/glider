@@ -5,5 +5,7 @@ setInterval(() => {
   chrome.runtime.sendMessage({ type: 'keepalive' }).catch(() => {});
 }, 20000); // Every 20 seconds
 
-// Initial ping
-chrome.runtime.sendMessage({ type: 'keepalive' }).catch(() => {});
+// Delay initial ping to let service worker initialize
+setTimeout(() => {
+  chrome.runtime.sendMessage({ type: 'keepalive' }).catch(() => {});
+}, 1000);
