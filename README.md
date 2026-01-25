@@ -111,7 +111,7 @@ See [PRIVACY.md](PRIVACY.md) for details.
 MIT
 
 <!-- BADGES -->
-[cws]: https://img.shields.io/badge/Chrome_Web_Store-pending-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white
+[cws]: https://img.shields.io/badge/Chrome_Web_Store-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white
 [cws-url]: https://chromewebstore.google.com/detail/glider/njbidokkffhgpofcejgcfcgcinmeoalj?hl=en-US
 [github]: https://img.shields.io/badge/GitHub-glider-181717?style=for-the-badge&logo=github&logoColor=white
 [github-url]: https://github.com/vdutts7/glider
