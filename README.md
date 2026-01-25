@@ -59,8 +59,8 @@ Designed to work with [glidercli](https://github.com/vdutts7/glidercli) for **te
 ### Extension icon states
 | Icon | Status |
 |------|--------|
-| 🔵 Blue | Connected to relay |
-| ⚫ Gray | Disconnected |
+| 🟢 | Connected to relay |
+| 🔴 | Disconnected |
 
 ## ⚙️How it works
 
