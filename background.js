@@ -83,6 +83,43 @@ function connect() {
       return;
     }
     
+    // CORS-bypassing fetch from extension context
+    if (msg.method === 'corsFetch') {
+      const response = { id: msg.id };
+      try {
+        const { url, options = {} } = msg.params || {};
+        
+        // MV3 FIX: credentials:'include' does NOT work for cross-origin requests in service workers
+        // We must manually include cookies using chrome.cookies.getAll()
+        const cookies = await chrome.cookies.getAll({ url: url });
+        const cookieString = cookies
+          .filter(c => !c.expirationDate || c.expirationDate > Date.now() / 1000)
+          .map(c => `${c.name}=${c.value}`)
+          .join('; ');
+        
+        const fetchOpts = {
+          method: options.method || 'GET',
+          headers: {
+            ...(options.headers || { 'Accept': 'application/json' }),
+            'Cookie': cookieString
+          }
+        };
+        if (options.body) fetchOpts.body = options.body;
+        
+        const resp = await fetch(url, fetchOpts);
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = text; }
+        response.result = { status: resp.status, ok: resp.ok, data };
+      } catch (err) {
+        response.error = err.message || 'Fetch failed';
+      }
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(response));
+      }
+      return;
+    }
+    
     if (msg.method === 'forwardCDPCommand') {
       const response = { id: msg.id };
       try {
