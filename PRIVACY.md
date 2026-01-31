@@ -29,4 +29,4 @@ This extension requires the following permissions:
 
 ## Contact
 
-For questions about this privacy policy, open an issue at https://github.com/vdutts/glider/issues
+For questions about this privacy policy, open an issue at https://github.com/vdutts7/glider/issues

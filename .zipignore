@@ -1,0 +1,13 @@
+# Files excluded from CWS zip
+.git
+.git/*
+.gitignore
+.zipignore
+.DS_Store
+*.log
+*.err
+assets/*
+store-listing.json
+README.md
+PRIVACY.md
+scripts/*
