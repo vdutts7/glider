@@ -12,3 +12,7 @@ README.md
 PRIVACY.md
 scripts/*
 docs
+.cursor/*
+.glider/*
+*.config.json
+cws-publish-process.json
