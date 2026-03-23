@@ -5,7 +5,7 @@
 <img src="https://raw.githubusercontent.com/vdutts7/squircle/refs/heads/main/webp/chrome.webp" alt="chrome" width="80" height="80" />
 
 <h1 align="center">glider</h1>
-<p align="center"><i><b>Chrome extension for browser automation via CDP.</b></i></p>
+<p align="center"><i><b>Chromium-based extension for CLI-powered browser automation</b></i></p>
 
 [![Chrome Web Store][cws]][cws-url]
 [![GitHub][github]][github-url]
@@ -18,9 +18,10 @@
 
 <ol>
     <a href="#about">About</a><br/>
+    <a href="#browsers">Browsers</a><br/>
     <a href="#install">Install</a><br/>
     <a href="#usage">Usage</a><br/>
-    <a href="#how-it-works">⚙️ How it Works</a><br/>
+    <a href="#how-it-works">How it works</a><br/>
     <a href="#cli">CLI</a><br/>
     <a href="#privacy">Privacy</a><br/>
     <a href="#contact">Contact</a>
@@ -30,31 +31,37 @@
 
 ## About
 
-Bridge Chrome tabs to local dev tools via Chrome DevTools Protocol (CDP)
+- bridge Chrome tabs to local dev tools through **Chrome DevTools Protocol (CDP)**
+- **CDP relay**: connects browser to a local WebSocket server
+- **tab control**: attaches + detaches debugger from any tab
+- **auto reconnect**: survives local relay restarts
+- **persistent runtime**: offscreen document keeps service worker alive
 
-- **CDP relay** - Connects browser to local WebSocket server
-- **Tab control** - Attach/detach debugger to any tab
-- **Auto-reconnect** - Survives relay restarts
-- **Persistent** - Offscreen document keeps service worker alive
+- built for [glidercli](https://github.com/vdutts7/glidercli) and **CLI-based browser automation**
 
-Designed to work with [glidercli](https://github.com/vdutts7/glidercli) for **terminal-based browser automation**
+## Browsers
+
+- chromium-based only (no Firefox/Safari/DuckDuckGo) because Glider uses a **Chrome Web Store extension** + CDP
+- default: **Google Chrome** for `glider connect`
+- supported: Arc, Microsoft Edge, Brave, Opera, Vivaldi
+  (extension must be installed + enabled in that same browser profile)
+- other Chromium: must support installing extensions from Chrome Web Store
+- choose browser via `GLIDER_BROWSER`
+    - > ex: `export GLIDER_BROWSER=Arc` then → `glider connect`
+- optional: `GLIDER_BROWSER_PATH` for non-default app bundle locations
+- full browser registry options → [glidercli docs/BROWSERS.md](https://github.com/vdutts7/glidercli/blob/main/docs/BROWSERS.md)
 
 ## Install
 
-### Chrome Web Store (recommended)
-[Get Glider Chrome extension here for free](https://chromewebstore.google.com/detail/glider/njbidokkffhgpofcejgcfcgcinmeoalj?hl=en-US)
+- install from [Chrome Web Store](https://chromewebstore.google.com/detail/glider/njbidokkffhgpofcejgcfcgcinmeoalj?hl=en-US)
 
-### Manual install
-1. Clone this repo
-2. Go to `chrome://extensions` > Enable "Developer mode" > Click "Load unpacked"
-5. Select this folder
 
 ## Usage
 
-1. Install [glidercli](https://github.com/vdutts7/glidercli): `npm i -g glidercli`
-2. Start relay: `glider install`
-3. Click extension icon (any tab)
-4. Use CLI commands: `glider eval "document.title"`
+- install [glidercli](https://github.com/vdutts7/glidercli): `npm i -g glidercli`
+- start relay: `glider install`
+- click extension icon in the target browser you want to automate
+- run a CLI command: `glider eval "document.title"`
 
 ### Extension icon states
 | Icon | Status |
@@ -62,19 +69,19 @@ Designed to work with [glidercli](https://github.com/vdutts7/glidercli) for **te
 | 🟢 | Connected to relay |
 | 🔴 | Disconnected |
 
-## ⚙️How it works
+## How it works
 
 ![Glider architecture diagram](https://res.cloudinary.com/ddyc1es5v/image/upload/v1774255955/vd7-website/glider-architecture-diagram.png)
 
-Source: [`docs/glider-architecture-diagram.excalidraw`](docs/glider-architecture-diagram.excalidraw)
+> source: [`docs/glider-architecture-diagram.excalidraw`](docs/glider-architecture-diagram.excalidraw)
 
-1. **bserve** runs as local WebSocket relay on port 19988
-2. **Extension** connects to relay, attaches CDP debugger to tabs
-3. **CLI** sends commands through relay to control browser
+- **bserve** runs local WebSocket relay on port `19988`
+- **extension** connects to relay + attaches a CDP debugger to tabs
+- **CLI** sends commands through relay to control browser
 
 ## CLI
 
-This extension is designed to work with [glidercli](https://github.com/vdutts7/glidercli):
+- use this extension with [glidercli](https://github.com/vdutts7/glidercli)
 
 ```bash
 npm i -g glidercli
@@ -85,16 +92,16 @@ glider eval "document.title"
 glider screenshot /tmp/page.png
 ```
 
-See [glidercli README](https://github.com/vdutts7/glidercli) for full documentation.
+- see the [glidercli README](https://github.com/vdutts7/glidercli) for full documentation
 
 ## Privacy
 
-- **No data collection** - Extension only communicates with localhost
-- **No external servers** - All traffic stays on your machine
-- **No tracking** - Zero analytics or telemetry
-- **Open source** - Full code visibility
+- **no data collection**: extension only communicates with `localhost`
+- **no external servers**: all traffic stays on your machine
+- **no tracking**: zero analytics/telemetry
+- **open source**: full code visibility
 
-See [PRIVACY.md](PRIVACY.md) for details.
+More details → [PRIVACY.md](PRIVACY.md)
 
 ## Contact
 
@@ -108,9 +115,7 @@ MIT
 <!-- BADGES -->
 [cws]: https://img.shields.io/badge/Chrome_Web_Store-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white
 [cws-url]: https://chromewebstore.google.com/detail/glider/njbidokkffhgpofcejgcfcgcinmeoalj?hl=en-US
-[github]: https://img.shields.io/badge/GitHub-glider-181717?style=for-the-badge&logo=github&logoColor=white
+[github]: https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white
 [github-url]: https://github.com/vdutts7/glider
-[email]: https://img.shields.io/badge/Email-000000?style=for-the-badge&logo=Gmail&logoColor=white
-[email-url]: mailto:me@vd7.io
 [twitter]: https://img.shields.io/badge/Twitter-000000?style=for-the-badge&logo=Twitter&logoColor=white
 [twitter-url]: https://x.com/vdutts7
