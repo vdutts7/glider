@@ -1,0 +1,3 @@
+flowchart LR
+    CLI["glidercli (CLI)"] <-->|WebSocket, port 19988| BSERVE["bserve (relay)"]
+    BSERVE <-->|CDP, extension| CHROME["Chrome (tabs)"]

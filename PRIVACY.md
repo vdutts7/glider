@@ -1,32 +1,34 @@
-# Privacy Policy for Glider
+# Privacy Policy | Glider
 
-**Last updated: January 7, 2026**
+**Last updated: Mar 22, 2026**
 
-## Data Collection
+## Data collection
 
-Glider does not collect, store, or transmit any user data.
+- Glider does not collect, store, or transmit any user data
 
-## Data Storage
+## Data storage
 
-No data is stored by this extension. All communication occurs locally between your browser and localhost (127.0.0.1).
+- ZERO data stored
+- all communication occurs locally between your browser and localhost (`127.0.0.1`)
 
-## Data Sharing
+## Data sharing
 
-No data is shared with any third parties. No analytics. No tracking.
+- no data shared with any third parties
+- no analytics
+- no tracking
 
-## How It Works
+## How it works
 
-Glider connects browser tabs to a local WebSocket server running on your machine. All data stays on your computer.
+- Glider connects browser tabs to a local WebSocket server running on your machine
+- all data stays on your computer
 
 ## Permissions
 
-This extension requires the following permissions:
-
-- **debugger**: Required to access Chrome DevTools Protocol (CDP) for browser automation and development tooling
-- **tabs**: Required to identify which tab the user wants to connect
-- **activeTab**: Required to interact with the current tab when the extension icon is clicked
-- **host_permissions (all URLs)**: Required because developers may need to connect to any website during development and testing
+- **debugger**: required to access Chrome DevTools Protocol (CDP) for browser automation and development tooling
+- **tabs**: required to identify which tab the user wants to connect
+- **activeTab**: required to interact with the current tab when the extension icon is clicked
+- **host_permissions (all URLs)**: required because developers may need to connect to any website during development and testing
 
 ## Contact
 
-For questions about this privacy policy, open an issue at https://github.com/vdutts7/glider/issues
+- Questions about privacy policy? Open issue → https://github.com/vdutts7/glider/issues
