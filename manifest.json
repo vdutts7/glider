@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Glider",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Connect browser tabs to your local development environment.",
   "author": "vd7",
   "homepage_url": "https://github.com/vdutts7/glider",
