@@ -4,3 +4,4 @@
 node_modules/
 store-listing.json
 scripts/
+*.zip
