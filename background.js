@@ -3,6 +3,21 @@ let ws = null;
 let connectedTabs = new Map();
 let nextSessionId = 1;
 
+// OOPIF-PATCH v1: track child (OOPIF/worker) sessions spawned by Target.setAutoAttach flatten
+// keyed by child sessionId. Value: { tabId (parent), targetId, targetType }
+let childSessions = new Map();
+
+// VENDOR-AGNOSTIC-PATCH v1: browser-internal URLs are un-attachable regardless of vendor.
+// Chromium forks each ship their own scheme (chrome://, edge://, brave://, opera://,
+// vivaldi://, arc://) plus 'about:' pages. Any attempt to chrome.debugger.attach one
+// throws; we skip them wholesale via this single predicate so vendor-specific literals
+// never sprawl through the codebase.
+function isBrowserInternalUrl(u) {
+  if (!u) return true;
+  if (u.startsWith('about:')) return true;
+  return /^(chrome|chrome-extension|edge|brave|opera|vivaldi|arc):\/\//.test(u);
+}
+
 // Create offscreen document to keep service worker alive
 let offscreenCreating = null;
 async function setupOffscreen() {
@@ -80,6 +95,41 @@ function connect() {
     if (msg.method === 'attachActiveTab') {
       await autoAttachActiveTab();
       ws.send(JSON.stringify({ id: msg.id, result: { attached: connectedTabs.size } }));
+      return;
+    }
+
+    //  reload the extension itself. New code is picked up on next boot.
+    // The extension's WS closes during reload → relay auto-reconnects → autoAttachActiveTab
+    // restores tabs from chrome.storage.
+    if (msg.method === 'reloadSelf') {
+      try {
+        await persistAttachedUrls();
+        ws.send(JSON.stringify({ id: msg.id, result: { reloading: true, persisted: connectedTabs.size } }));
+        setTimeout(() => { try { chrome.runtime.reload(); } catch(e) {} }, 200);
+      } catch(e) {
+        ws.send(JSON.stringify({ id: msg.id, error: { message: e.message } }));
+      }
+      return;
+    }
+
+    //  attach ALL relevant tabs, not just the first one.
+    if (msg.method === 'attachAllTabs') {
+      const filter = msg.params?.urlSubstring;   // optional filter (e.g. 'example.com')
+      let attached = 0, skipped = 0, failed = 0;
+      try {
+        const tabs = await chrome.tabs.query({});
+        for (const tab of tabs) {
+          if (!tab || !tab.id || !tab.url) { skipped++; continue; }
+          if (isBrowserInternalUrl(tab.url)) { skipped++; continue; }
+          if (filter && !tab.url.includes(filter)) { skipped++; continue; }
+          if (connectedTabs.has(tab.id)) { skipped++; continue; }
+          try { await attachTab(tab.id); attached++; } catch(e) { failed++; }
+        }
+        await persistAttachedUrls();
+        ws.send(JSON.stringify({ id: msg.id, result: { attached, skipped, failed, total_connected: connectedTabs.size } }));
+      } catch(e) {
+        ws.send(JSON.stringify({ id: msg.id, error: { message: e.message } }));
+      }
       return;
     }
     
@@ -261,12 +311,24 @@ async function handleCDP({ method, params, sessionId }) {
   
   // Session-scoped commands need a valid tab
   let tabId = null;
+  let childRoute = null;  // OOPIF-PATCH: if sessionId is a child, route with {tabId, sessionId} to chrome.debugger
   for (const [tid, info] of connectedTabs) {
     if (info.sessionId === sessionId) { tabId = tid; break; }
   }
-  
+  if (!tabId) {
+    // OOPIF-PATCH: check child sessions
+    const child = childSessions.get(sessionId);
+    if (child) {
+      tabId = child.tabId;
+      childRoute = sessionId;
+    }
+  }
+
   if (!tabId) throw new Error('Session not found');
-  return await chrome.debugger.sendCommand({ tabId }, method, params);
+  // OOPIF-PATCH: for child (OOPIF) sessions, chrome.debugger.sendCommand accepts
+  // {tabId, sessionId} as the target to route into the flatten sub-session.
+  const target = childRoute ? { tabId, sessionId: childRoute } : { tabId };
+  return await chrome.debugger.sendCommand(target, method, params);
 }
 
 async function attachTab(tabId) {
@@ -305,6 +367,8 @@ async function attachTab(tabId) {
   }
   
   updateIcon();
+  //  persist attached URL list for post-restart restore
+  persistAttachedUrls().catch(() => {});
   return { targetInfo, sessionId };
 }
 
@@ -325,6 +389,8 @@ function detachTab(tabId) {
   connectedTabs.delete(tabId);
   chrome.debugger.detach({ tabId }).catch(() => {});
   updateIcon();
+  //  keep persisted URLs fresh so restart-restore reflects reality
+  persistAttachedUrls().catch(() => {});
 }
 
 function updateIcon() {
@@ -336,9 +402,52 @@ function updateIcon() {
 
 chrome.debugger.onEvent.addListener((src, method, params) => {
   const info = connectedTabs.get(src.tabId);
-  if (info && ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ method: 'forwardCDPEvent', params: { sessionId: info.sessionId, method, params } }));
+  if (!info || ws?.readyState !== WebSocket.OPEN) return;
+
+  // OOPIF-PATCH: intercept child attach/detach events (params.sessionId identifies child)
+  // and forward under the CHILD's sessionId so client-side session routing works.
+  const childSid = params && params.sessionId ? params.sessionId : null;
+
+  if (method === 'Target.attachedToTarget' && childSid) {
+    const ti = params.targetInfo || {};
+    childSessions.set(childSid, {
+      tabId: src.tabId,
+      targetId: ti.targetId,
+      targetType: ti.type,
+      url: ti.url
+    });
+    // Forward the event verbatim (params still carry childSid) but under an EMPTY
+    // top-level sessionId so client-side sees "browser-level" attached event —
+    // matches CDP flatten semantics: attach events for children are emitted at the
+    // parent session level with params.sessionId identifying the new child.
+    ws.send(JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: { sessionId: info.sessionId, method, params }
+    }));
+    return;
   }
+
+  if (method === 'Target.detachedFromTarget' && childSid) {
+    childSessions.delete(childSid);
+    ws.send(JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: { sessionId: info.sessionId, method, params }
+    }));
+    return;
+  }
+
+  // OOPIF-PATCH: for events emitted from within a CHILD session (Network.*, Runtime.*),
+  // chrome.debugger sets src.sessionId. Route those under the child sessionId.
+  if (src.sessionId && childSessions.has(src.sessionId)) {
+    ws.send(JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: { sessionId: src.sessionId, method, params }
+    }));
+    return;
+  }
+
+  // Default: forward under parent tab's sessionId (existing behavior)
+  ws.send(JSON.stringify({ method: 'forwardCDPEvent', params: { sessionId: info.sessionId, method, params } }));
 });
 
 chrome.debugger.onDetach.addListener((src) => {
@@ -368,8 +477,8 @@ async function ensureConnected() {
 
 chrome.action.onClicked.addListener(async (tab) => {
   console.log('[glider] Extension icon clicked, tab:', tab?.id, tab?.url);
-  if (!tab.id || tab.url?.startsWith('chrome://') || tab.url?.startsWith('chrome-extension://')) {
-    console.log('[glider] Skipping chrome:// or extension page');
+  if (!tab.id || isBrowserInternalUrl(tab.url)) {
+    console.log('[glider] Skipping browser-internal or extension page');
     return;
   }
   
@@ -416,29 +525,56 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 async function autoAttachActiveTab() {
   console.log('[glider] autoAttachActiveTab called');
   try {
-    // Get ALL tabs, not just active ones
+    //  attempt to restore previously-attached tabs from chrome.storage
+    // so `glider restart` doesn't lose N sessions per restart.
+    let priorUrls = [];
+    try {
+      const s = await chrome.storage.local.get('lastAttachedUrls');
+      priorUrls = s.lastAttachedUrls || [];
+    } catch(e) {}
+
     const tabs = await chrome.tabs.query({});
-    console.log('[glider] Found', tabs.length, 'total tabs');
-    
-    for (const tab of tabs) {
-      console.log('[glider] Checking tab:', tab.id, tab.url?.slice(0, 50));
-      if (tab && tab.id && !tab.url?.startsWith('chrome://') && !tab.url?.startsWith('chrome-extension://')) {
-        if (!connectedTabs.has(tab.id)) {
-          try {
-            await attachTab(tab.id);
-            console.log('[glider] Auto-attached to tab:', tab.url);
-            // Only attach first valid tab
-            return;
-          } catch (e) {
-            console.log('[glider] Failed to attach tab:', tab.id, e.message);
-          }
-        }
+    console.log('[glider] Found', tabs.length, 'total tabs; prior attached count:', priorUrls.length);
+
+    let attachedThisCall = 0;
+    // Priority 1: reattach tabs whose URLs match priorUrls
+    if (priorUrls.length > 0) {
+      const priorSet = new Set(priorUrls);
+      for (const tab of tabs) {
+        if (!tab || !tab.id || !tab.url) continue;
+        if (isBrowserInternalUrl(tab.url)) continue;
+        if (!priorSet.has(tab.url)) continue;
+        if (connectedTabs.has(tab.id)) continue;
+        try { await attachTab(tab.id); attachedThisCall++; console.log('[glider] Restored prior tab:', tab.url.slice(0,80)); }
+        catch(e) { console.log('[glider] Prior-restore failed:', tab.id, e.message); }
       }
     }
-    console.log('[glider] No valid tabs found to attach');
+
+    // Priority 2: if nothing restored, fall back to attaching the active tab (original behavior)
+    if (attachedThisCall === 0) {
+      for (const tab of tabs) {
+        if (!tab || !tab.id) continue;
+        if (isBrowserInternalUrl(tab.url)) continue;
+        if (connectedTabs.has(tab.id)) continue;
+        try { await attachTab(tab.id); console.log('[glider] Fallback-attached:', tab.url?.slice(0,80)); return; }
+        catch(e) {}
+      }
+    }
+    console.log('[glider] autoAttachActiveTab done; attached this call:', attachedThisCall);
   } catch (e) {
     console.log('[glider] Auto-attach failed:', e.message);
   }
+}
+
+//  persist URL of every attached tab so we can restore across restarts.
+async function persistAttachedUrls() {
+  try {
+    const urls = [];
+    for (const [tabId, _info] of connectedTabs) {
+      try { const t = await chrome.tabs.get(tabId); if (t && t.url) urls.push(t.url); } catch(e) {}
+    }
+    await chrome.storage.local.set({ lastAttachedUrls: urls });
+  } catch(e) {}
 }
 
 // Also auto-attach when switching tabs (optional aggressive mode)
@@ -446,7 +582,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   if (ws?.readyState !== WebSocket.OPEN) return;
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
-    if (tab && !tab.url?.startsWith('chrome://') && !tab.url?.startsWith('chrome-extension://')) {
+    if (tab && !isBrowserInternalUrl(tab.url)) {
       if (!connectedTabs.has(tab.id)) {
         await attachTab(tab.id);
         console.log('[glider] Auto-attached on tab switch:', tab.url);
@@ -465,7 +601,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   
   try {
     const updatedTab = await chrome.tabs.get(tab.id);
-    if (updatedTab && !updatedTab.url?.startsWith('chrome://') && !updatedTab.url?.startsWith('chrome-extension://')) {
+    if (updatedTab && !isBrowserInternalUrl(updatedTab.url)) {
       await attachTab(tab.id);
       console.log('[glider] Auto-attached to new tab:', updatedTab.url);
     }
@@ -478,7 +614,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (ws?.readyState !== WebSocket.OPEN) return;
   if (connectedTabs.size > 0) return; // Already have connections
   
-  if (tab && !tab.url?.startsWith('chrome://') && !tab.url?.startsWith('chrome-extension://')) {
+  if (tab && !isBrowserInternalUrl(tab.url)) {
     try {
       await attachTab(tabId);
       console.log('[glider] Auto-attached on tab load:', tab.url);
