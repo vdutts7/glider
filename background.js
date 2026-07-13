@@ -98,7 +98,7 @@ function connect() {
       return;
     }
 
-    //  reload the extension itself. New code is picked up on next boot.
+    // Reload the extension itself. New code is picked up on next boot.
     // The extension's WS closes during reload → relay auto-reconnects → autoAttachActiveTab
     // restores tabs from chrome.storage.
     if (msg.method === 'reloadSelf') {
@@ -112,21 +112,34 @@ function connect() {
       return;
     }
 
-    //  attach ALL relevant tabs, not just the first one.
+    // v3.24: attach ALL relevant tabs in PARALLEL with per-tab timeout.
+    // v3.23 shipped sequential await - one unresponsive tab blocked the whole batch
+    // (relay CLI timed out at 30s). v3.24: Promise.allSettled + 5s cap per tab so a
+    // hung tab yields failed++ and the batch completes.
     if (msg.method === 'attachAllTabs') {
       const filter = msg.params?.urlSubstring;   // optional filter (e.g. 'example.com')
-      let attached = 0, skipped = 0, failed = 0;
+      const perTabTimeoutMs = Number(msg.params?.perTabTimeoutMs) || 5000;
+      let attached = 0, skipped = 0, failed = 0, timeouts = 0;
       try {
         const tabs = await chrome.tabs.query({});
+        const attachPromises = [];
         for (const tab of tabs) {
           if (!tab || !tab.id || !tab.url) { skipped++; continue; }
           if (isBrowserInternalUrl(tab.url)) { skipped++; continue; }
           if (filter && !tab.url.includes(filter)) { skipped++; continue; }
           if (connectedTabs.has(tab.id)) { skipped++; continue; }
-          try { await attachTab(tab.id); attached++; } catch(e) { failed++; }
+          const p = Promise.race([
+            attachTab(tab.id).then(() => ({ ok: true })),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('per-tab-timeout')), perTabTimeoutMs))
+          ]).then(
+            () => { attached++; },
+            (e) => { failed++; if (e && /per-tab-timeout/.test(e.message||'')) timeouts++; }
+          );
+          attachPromises.push(p);
         }
+        await Promise.allSettled(attachPromises);
         await persistAttachedUrls();
-        ws.send(JSON.stringify({ id: msg.id, result: { attached, skipped, failed, total_connected: connectedTabs.size } }));
+        ws.send(JSON.stringify({ id: msg.id, result: { attached, skipped, failed, timeouts, total_connected: connectedTabs.size } }));
       } catch(e) {
         ws.send(JSON.stringify({ id: msg.id, error: { message: e.message } }));
       }
@@ -204,8 +217,28 @@ async function handleCDP({ method, params, sessionId }) {
           return { sessionId: info.sessionId };
         }
       }
-      // If not found, try to attach to it
-      // This handles the case where the target was created but not yet tracked
+      // v3.24-FIX (OOPIF-DISPATCH): the requested targetId may be a CHILD (OOPIF /
+      // worker / service worker) surfaced by Target.setAutoAttach{flatten:true} on a
+      // parent tab. In that case it's already in childSessions and we just return
+      // its sessionId - no re-attach needed (auto-attach did it).
+      for (const [csid, cinfo] of childSessions) {
+        if (cinfo.targetId === targetId) {
+          return { sessionId: csid };
+        }
+      }
+      // v3.24-FIX: last resort - the client discovered the targetId via
+      // Target.getTargets but the OOPIF hasn't fired the auto-attach event yet.
+      // Try live attach on each parent tab; first one that succeeds wins.
+      for (const [ptid, pinfo] of connectedTabs) {
+        try {
+          const r = await chrome.debugger.sendCommand({ tabId: ptid }, 'Target.attachToTarget', { targetId, flatten: true });
+          if (r && r.sessionId) {
+            // Record it - attachedToTarget listener will double-record; harmless.
+            childSessions.set(r.sessionId, { tabId: ptid, targetId, targetType: 'iframe', url: '' });
+            return { sessionId: r.sessionId };
+          }
+        } catch (_) { /* try next parent */ }
+      }
       throw new Error('Target not found: ' + targetId);
     }
     
@@ -299,13 +332,26 @@ async function handleCDP({ method, params, sessionId }) {
     }
     
     if (method === 'Target.getTargets') {
-      return {
-        targetInfos: Array.from(connectedTabs.values()).map(info => ({
-          targetId: info.targetId,
-          type: 'page',
-          attached: true
-        }))
-      };
+      // v3.24-FIX (OOPIF-DISPATCH): include both top-level tabs AND tracked
+      // OOPIF/worker child sessions so callers can discover children without
+      // per-tab probing; nested iframe targets are now listed for callers.
+      const parents = Array.from(connectedTabs.values()).map(info => ({
+        targetId: info.targetId,
+        type: 'page',
+        attached: true
+      }));
+      const children = Array.from(childSessions.entries()).map(([sid, cinfo]) => ({
+        targetId: cinfo.targetId,
+        type: cinfo.targetType || 'iframe',
+        url: cinfo.url || '',
+        attached: true,
+        openerId: (function() {
+          const p = connectedTabs.get(cinfo.tabId);
+          return p ? p.targetId : undefined;
+        })(),
+        _oopif: true
+      }));
+      return { targetInfos: parents.concat(children) };
     }
   }
   
@@ -367,7 +413,7 @@ async function attachTab(tabId) {
   }
   
   updateIcon();
-  //  persist attached URL list for post-restart restore
+  // Persist attached URL list for post-restart restore
   persistAttachedUrls().catch(() => {});
   return { targetInfo, sessionId };
 }
@@ -389,7 +435,7 @@ function detachTab(tabId) {
   connectedTabs.delete(tabId);
   chrome.debugger.detach({ tabId }).catch(() => {});
   updateIcon();
-  //  keep persisted URLs fresh so restart-restore reflects reality
+  // Keep persisted URLs fresh so restart-restore reflects reality
   persistAttachedUrls().catch(() => {});
 }
 
@@ -417,7 +463,7 @@ chrome.debugger.onEvent.addListener((src, method, params) => {
       url: ti.url
     });
     // Forward the event verbatim (params still carry childSid) but under an EMPTY
-    // top-level sessionId so client-side sees "browser-level" attached event —
+    // top-level sessionId so client-side sees "browser-level" attached event -
     // matches CDP flatten semantics: attach events for children are emitted at the
     // parent session level with params.sessionId identifying the new child.
     ws.send(JSON.stringify({
@@ -525,7 +571,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 async function autoAttachActiveTab() {
   console.log('[glider] autoAttachActiveTab called');
   try {
-    //  attempt to restore previously-attached tabs from chrome.storage
+    // Attempt to restore previously-attached tabs from chrome.storage
     // so `glider restart` doesn't lose N sessions per restart.
     let priorUrls = [];
     try {
@@ -566,7 +612,7 @@ async function autoAttachActiveTab() {
   }
 }
 
-//  persist URL of every attached tab so we can restore across restarts.
+// Persist URL of every attached tab so we can restore across restarts.
 async function persistAttachedUrls() {
   try {
     const urls = [];
