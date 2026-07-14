@@ -194,6 +194,27 @@ function connect() {
         ws.send(JSON.stringify(response));
       }
     }
+
+    // Cookie reader - reads HttpOnly cookies via chrome.cookies API.
+    // MV3 extensions with "cookies" permission bypass the document.cookie HttpOnly wall.
+    if (msg.method === 'getCookies') {
+      const response = { id: msg.id };
+      try {
+        const p = msg.params || {};
+        const query = {};
+        if (p.url) query.url = p.url;
+        if (p.domain) query.domain = p.domain;
+        if (p.name) query.name = p.name;
+        const cookies = await chrome.cookies.getAll(query);
+        response.result = { data: cookies };
+      } catch (err) {
+        response.error = err.message || 'getCookies failed';
+      }
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(response));
+      }
+      return;
+    }
   };
 }
 
