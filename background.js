@@ -215,6 +215,43 @@ function connect() {
       }
       return;
     }
+
+    // Cookie writer - sets a cookie (bypasses HttpOnly/SameSite frontend restrictions).
+    // Params: { url, name, value, domain?, path?, secure?, httpOnly?, sameSite?, expirationDate? }
+    if (msg.method === 'setCookie') {
+      const response = { id: msg.id };
+      try {
+        const p = msg.params || {};
+        if (!p.url || !p.name) throw new Error('setCookie requires url and name');
+        const details = { url: p.url, name: p.name, value: p.value ?? '' };
+        for (const k of ['domain','path','secure','httpOnly','sameSite','expirationDate','storeId']) {
+          if (p[k] !== undefined) details[k] = p[k];
+        }
+        const cookie = await chrome.cookies.set(details);
+        response.result = { cookie };
+      } catch (err) {
+        response.error = err.message || 'setCookie failed';
+      }
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
+      return;
+    }
+
+    // Cookie deleter - removes a cookie. Params: { url, name, storeId? }
+    if (msg.method === 'removeCookie') {
+      const response = { id: msg.id };
+      try {
+        const p = msg.params || {};
+        if (!p.url || !p.name) throw new Error('removeCookie requires url and name');
+        const details = { url: p.url, name: p.name };
+        if (p.storeId) details.storeId = p.storeId;
+        const removed = await chrome.cookies.remove(details);
+        response.result = { removed };
+      } catch (err) {
+        response.error = err.message || 'removeCookie failed';
+      }
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
+      return;
+    }
   };
 }
 
