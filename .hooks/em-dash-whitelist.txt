@@ -1,0 +1,4 @@
+# Obsolete: path whitelist unused.
+#
+# Policy: Unicode U+2013/U+2014 -> hyphen (-) in staged text; .hooks/** skipped.
+# Bypass once: EM_DASH_APPROVE=1 git commit ...
