@@ -1,7 +1,24 @@
 const RELAY_URL = 'ws://localhost:19988/extension';
-let ws = null;
+// WS lives in offscreen.js; SW talks via persistent port (wakes live chrome.* context).
+let bridgePort = null;
+let relayOpen = false;
 let connectedTabs = new Map();
 let nextSessionId = 1;
+
+function relayConnected() {
+  return !!(bridgePort && relayOpen);
+}
+
+function relaySend(obj) {
+  if (!bridgePort) return false;
+  try {
+    bridgePort.postMessage(obj);
+    return true;
+  } catch (_) {
+    bridgePort = null;
+    return false;
+  }
+}
 
 // OOPIF-PATCH v1: track child (OOPIF/worker) sessions spawned by Target.setAutoAttach flatten
 // keyed by child sessionId. Value: { tabId (parent), targetId, targetType }
@@ -18,6 +35,26 @@ function isBrowserInternalUrl(u) {
   return /^(chrome|chrome-extension|edge|brave|opera|vivaldi|arc):\/\//.test(u);
 }
 
+// Chromium returns literal "No SW" when an extension API is dispatched after the
+// MV3 worker stopped (crbug 341232995). Retry + poke an extension API to revive.
+async function withSwRetry(fn, tries = 6) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      last = e;
+      const msg = (e && e.message) ? e.message : String(e);
+      if (!/No SW/i.test(msg)) throw e;
+      try { await chrome.runtime.getPlatformInfo(); } catch (_) {}
+      try { await setupOffscreen(); } catch (_) {}
+      if (!relayConnected()) connect();
+      await new Promise((r) => setTimeout(r, 50 * (i + 1)));
+    }
+  }
+  throw last;
+}
+
 // Create offscreen document to keep service worker alive
 let offscreenCreating = null;
 async function setupOffscreen() {
@@ -29,8 +66,8 @@ async function setupOffscreen() {
       if (!hasDoc) {
         await chrome.offscreen.createDocument({
           url: 'offscreen.html',
-          reasons: ['BLOBS'],
-          justification: 'Keep service worker alive for persistent browser automation'
+          reasons: ['BLOBS', 'WORKERS'],
+          justification: 'Hold relay WebSocket outside MV3 SW so chrome.* APIs stay live'
         });
       }
     } catch (e) {
@@ -57,203 +94,189 @@ chrome.runtime.onInstalled.addListener(setupOffscreen);
 chrome.runtime.onStartup.addListener(setupOffscreen);
 
 function connect() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
-  
-  try {
-    ws = new WebSocket(RELAY_URL);
-  } catch (e) {
+  // Prefer offscreen-owned WS. SW only ensures the document + bridge port exist.
+  setupOffscreen().catch(() => {});
+}
+
+function bindBridgePort(port) {
+  bridgePort = port;
+  port.onMessage.addListener(async (msg) => {
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'keepalive') return;
+    if (msg.type === 'relay-open') {
+      relayOpen = true;
+      updateIcon();
+      await new Promise((r) => setTimeout(r, 300));
+      await autoAttachActiveTab();
+      return;
+    }
+    if (msg.type === 'relay-closed') {
+      relayOpen = false;
+      connectedTabs.clear();
+      updateIcon();
+      return;
+    }
+    if (msg.type === 'relay') {
+      await handleRelayInbound(msg.payload || {});
+    }
+  });
+  port.onDisconnect.addListener(() => {
+    if (bridgePort === port) bridgePort = null;
+    relayOpen = false;
     updateIcon();
+  });
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'relay-bridge') return;
+  bindBridgePort(port);
+});
+
+async function handleRelayInbound(msg) {
+  if (msg.method === 'ping') {
+    relaySend({ method: 'pong' });
     return;
   }
-  
-  ws.onopen = async () => {
-    console.log('[glider] WebSocket connected to relay');
-    updateIcon();
-    // Wait a bit for everything to settle
-    await new Promise(r => setTimeout(r, 500));
-    // AUTO-ATTACH: When relay connects, attach to active tab automatically
+
+  if (msg.method === 'attachActiveTab') {
     await autoAttachActiveTab();
-  };
-  ws.onerror = () => {};
-  ws.onclose = () => {
-    ws = null;
-    connectedTabs.clear();
-    updateIcon();
-    setTimeout(connect, 3000);
-  };
-  
-  ws.onmessage = async (e) => {
-    let msg;
-    try { msg = JSON.parse(e.data); } catch { return; }
-    
-    if (msg.method === 'ping') {
-      ws.send(JSON.stringify({ method: 'pong' }));
-      return;
-    }
-    
-    // Command from relay to attach active tab
-    if (msg.method === 'attachActiveTab') {
-      await autoAttachActiveTab();
-      ws.send(JSON.stringify({ id: msg.id, result: { attached: connectedTabs.size } }));
-      return;
-    }
+    relaySend({ id: msg.id, result: { attached: connectedTabs.size } });
+    return;
+  }
 
-    // Reload the extension itself. New code is picked up on next boot.
-    // The extension's WS closes during reload → relay auto-reconnects → autoAttachActiveTab
-    // restores tabs from chrome.storage.
-    if (msg.method === 'reloadSelf') {
-      try {
-        await persistAttachedUrls();
-        ws.send(JSON.stringify({ id: msg.id, result: { reloading: true, persisted: connectedTabs.size } }));
-        setTimeout(() => { try { chrome.runtime.reload(); } catch(e) {} }, 200);
-      } catch(e) {
-        ws.send(JSON.stringify({ id: msg.id, error: { message: e.message } }));
+  if (msg.method === 'reloadSelf') {
+    try {
+      await persistAttachedUrls();
+      relaySend({ id: msg.id, result: { reloading: true, persisted: connectedTabs.size } });
+      setTimeout(() => { try { chrome.runtime.reload(); } catch (e) {} }, 200);
+    } catch (e) {
+      relaySend({ id: msg.id, error: { message: e.message } });
+    }
+    return;
+  }
+
+  if (msg.method === 'attachAllTabs') {
+    const filter = msg.params?.urlSubstring;
+    const perTabTimeoutMs = Number(msg.params?.perTabTimeoutMs) || 5000;
+    let attached = 0, skipped = 0, failed = 0, timeouts = 0;
+    try {
+      const tabs = await withSwRetry(() => chrome.tabs.query({}));
+      const attachPromises = [];
+      for (const tab of tabs) {
+        if (!tab || !tab.id || !tab.url) { skipped++; continue; }
+        if (isBrowserInternalUrl(tab.url)) { skipped++; continue; }
+        if (filter && !tab.url.includes(filter)) { skipped++; continue; }
+        if (connectedTabs.has(tab.id)) { skipped++; continue; }
+        const p = Promise.race([
+          attachTab(tab.id).then(() => ({ ok: true })),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('per-tab-timeout')), perTabTimeoutMs))
+        ]).then(
+          () => { attached++; },
+          (e) => { failed++; if (e && /per-tab-timeout/.test(e.message || '')) timeouts++; }
+        );
+        attachPromises.push(p);
       }
-      return;
+      await Promise.allSettled(attachPromises);
+      await persistAttachedUrls();
+      relaySend({ id: msg.id, result: { attached, skipped, failed, timeouts, total_connected: connectedTabs.size } });
+    } catch (e) {
+      relaySend({ id: msg.id, error: { message: e.message } });
     }
+    return;
+  }
 
-    // v3.24: attach ALL relevant tabs in PARALLEL with per-tab timeout.
-    // v3.23 shipped sequential await - one unresponsive tab blocked the whole batch
-    // (relay CLI timed out at 30s). v3.24: Promise.allSettled + 5s cap per tab so a
-    // hung tab yields failed++ and the batch completes.
-    if (msg.method === 'attachAllTabs') {
-      const filter = msg.params?.urlSubstring;   // optional filter (e.g. 'example.com')
-      const perTabTimeoutMs = Number(msg.params?.perTabTimeoutMs) || 5000;
-      let attached = 0, skipped = 0, failed = 0, timeouts = 0;
-      try {
-        const tabs = await chrome.tabs.query({});
-        const attachPromises = [];
-        for (const tab of tabs) {
-          if (!tab || !tab.id || !tab.url) { skipped++; continue; }
-          if (isBrowserInternalUrl(tab.url)) { skipped++; continue; }
-          if (filter && !tab.url.includes(filter)) { skipped++; continue; }
-          if (connectedTabs.has(tab.id)) { skipped++; continue; }
-          const p = Promise.race([
-            attachTab(tab.id).then(() => ({ ok: true })),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('per-tab-timeout')), perTabTimeoutMs))
-          ]).then(
-            () => { attached++; },
-            (e) => { failed++; if (e && /per-tab-timeout/.test(e.message||'')) timeouts++; }
-          );
-          attachPromises.push(p);
+  if (msg.method === 'corsFetch') {
+    const response = { id: msg.id };
+    try {
+      const { url, options = {} } = msg.params || {};
+      const cookies = await withSwRetry(() => chrome.cookies.getAll({ url: url }));
+      const cookieString = cookies
+        .filter(c => !c.expirationDate || c.expirationDate > Date.now() / 1000)
+        .map(c => `${c.name}=${c.value}`)
+        .join('; ');
+      const fetchOpts = {
+        method: options.method || 'GET',
+        headers: {
+          ...(options.headers || { 'Accept': 'application/json' }),
+          'Cookie': cookieString
         }
-        await Promise.allSettled(attachPromises);
-        await persistAttachedUrls();
-        ws.send(JSON.stringify({ id: msg.id, result: { attached, skipped, failed, timeouts, total_connected: connectedTabs.size } }));
-      } catch(e) {
-        ws.send(JSON.stringify({ id: msg.id, error: { message: e.message } }));
-      }
-      return;
+      };
+      if (options.body) fetchOpts.body = options.body;
+      const resp = await fetch(url, fetchOpts);
+      const text = await resp.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = text; }
+      response.result = { status: resp.status, ok: resp.ok, data };
+    } catch (err) {
+      response.error = err.message || 'Fetch failed';
     }
-    
-    // CORS-bypassing fetch from extension context
-    if (msg.method === 'corsFetch') {
-      const response = { id: msg.id };
-      try {
-        const { url, options = {} } = msg.params || {};
-        
-        // MV3 FIX: credentials:'include' does NOT work for cross-origin requests in service workers
-        // We must manually include cookies using chrome.cookies.getAll()
-        const cookies = await chrome.cookies.getAll({ url: url });
-        const cookieString = cookies
-          .filter(c => !c.expirationDate || c.expirationDate > Date.now() / 1000)
-          .map(c => `${c.name}=${c.value}`)
-          .join('; ');
-        
-        const fetchOpts = {
-          method: options.method || 'GET',
-          headers: {
-            ...(options.headers || { 'Accept': 'application/json' }),
-            'Cookie': cookieString
-          }
-        };
-        if (options.body) fetchOpts.body = options.body;
-        
-        const resp = await fetch(url, fetchOpts);
-        const text = await resp.text();
-        let data;
-        try { data = JSON.parse(text); } catch { data = text; }
-        response.result = { status: resp.status, ok: resp.ok, data };
-      } catch (err) {
-        response.error = err.message || 'Fetch failed';
-      }
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(response));
-      }
-      return;
-    }
-    
-    if (msg.method === 'forwardCDPCommand') {
-      const response = { id: msg.id };
-      try {
-        response.result = await handleCDP(msg.params);
-      } catch (err) {
-        response.error = err.message || 'Unknown error';
-      }
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(response));
-      }
-    }
+    relaySend(response);
+    return;
+  }
 
-    // Cookie reader - reads HttpOnly cookies via chrome.cookies API.
-    // MV3 extensions with "cookies" permission bypass the document.cookie HttpOnly wall.
-    if (msg.method === 'getCookies') {
-      const response = { id: msg.id };
-      try {
-        const p = msg.params || {};
-        const query = {};
-        if (p.url) query.url = p.url;
-        if (p.domain) query.domain = p.domain;
-        if (p.name) query.name = p.name;
-        const cookies = await chrome.cookies.getAll(query);
-        response.result = { data: cookies };
-      } catch (err) {
-        response.error = err.message || 'getCookies failed';
-      }
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(response));
-      }
-      return;
+  if (msg.method === 'forwardCDPCommand') {
+    const response = { id: msg.id };
+    try {
+      response.result = await handleCDP(msg.params);
+    } catch (err) {
+      response.error = err.message || 'Unknown error';
     }
+    relaySend(response);
+    return;
+  }
 
-    // Cookie writer - sets a cookie (bypasses HttpOnly/SameSite frontend restrictions).
-    // Params: { url, name, value, domain?, path?, secure?, httpOnly?, sameSite?, expirationDate? }
-    if (msg.method === 'setCookie') {
-      const response = { id: msg.id };
-      try {
-        const p = msg.params || {};
-        if (!p.url || !p.name) throw new Error('setCookie requires url and name');
-        const details = { url: p.url, name: p.name, value: p.value ?? '' };
-        for (const k of ['domain','path','secure','httpOnly','sameSite','expirationDate','storeId']) {
-          if (p[k] !== undefined) details[k] = p[k];
-        }
-        const cookie = await chrome.cookies.set(details);
-        response.result = { cookie };
-      } catch (err) {
-        response.error = err.message || 'setCookie failed';
-      }
-      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
-      return;
+  if (msg.method === 'getCookies') {
+    const response = { id: msg.id };
+    try {
+      const p = msg.params || {};
+      const query = {};
+      if (p.url) query.url = p.url;
+      if (p.domain) query.domain = p.domain;
+      if (p.name) query.name = p.name;
+      const cookies = await withSwRetry(() => chrome.cookies.getAll(query));
+      response.result = { data: cookies };
+    } catch (err) {
+      response.error = err.message || 'getCookies failed';
     }
+    relaySend(response);
+    return;
+  }
 
-    // Cookie deleter - removes a cookie. Params: { url, name, storeId? }
-    if (msg.method === 'removeCookie') {
-      const response = { id: msg.id };
-      try {
-        const p = msg.params || {};
-        if (!p.url || !p.name) throw new Error('removeCookie requires url and name');
-        const details = { url: p.url, name: p.name };
-        if (p.storeId) details.storeId = p.storeId;
-        const removed = await chrome.cookies.remove(details);
-        response.result = { removed };
-      } catch (err) {
-        response.error = err.message || 'removeCookie failed';
+  if (msg.method === 'setCookie') {
+    const response = { id: msg.id };
+    try {
+      const p = msg.params || {};
+      if (!p.url || !p.name) throw new Error('setCookie requires url and name');
+      const details = { url: p.url, name: p.name, value: p.value ?? '' };
+      for (const k of ['domain', 'path', 'secure', 'httpOnly', 'sameSite', 'expirationDate', 'storeId']) {
+        if (p[k] !== undefined) details[k] = p[k];
       }
-      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
-      return;
+      const cookie = await withSwRetry(() => chrome.cookies.set(details));
+      response.result = { cookie };
+    } catch (err) {
+      response.error = err.message || 'setCookie failed';
     }
-  };
+    relaySend(response);
+    return;
+  }
+
+  if (msg.method === 'removeCookie') {
+    const response = { id: msg.id };
+    try {
+      const p = msg.params || {};
+      if (!p.url || !p.name) throw new Error('removeCookie requires url and name');
+      const details = { url: p.url, name: p.name };
+      if (p.storeId) details.storeId = p.storeId;
+      const removed = await withSwRetry(() => chrome.cookies.remove(details));
+      response.result = { removed };
+    } catch (err) {
+      response.error = err.message || 'removeCookie failed';
+    }
+    relaySend(response);
+    return;
+  }
 }
+
 
 async function handleCDP({ method, params, sessionId }) {
   // Browser-level commands that don't need a tab/session
@@ -301,25 +324,28 @@ async function handleCDP({ method, params, sessionId }) {
     }
     
     if (method === 'Target.createTarget') {
-      // Create new tab (optionally in new window)
+      // Strip tab, background only. No focus steal. Strip-invisible (CDP hidden)
+      // stays in glidercli remotedebug path, not here.
+      const url = params?.url || 'about:blank';
       let tab;
       if (params?.newWindow) {
-        // Create in new window - these tabs CAN be closed
-        const win = await chrome.windows.create({ url: params?.url || 'about:blank', focused: false });
+        const win = await withSwRetry(() => chrome.windows.create({
+          url,
+          focused: false,
+          state: 'minimized',
+        }));
         tab = win.tabs[0];
       } else {
-        tab = await chrome.tabs.create({ url: params?.url || 'about:blank', active: false });
+        tab = await withSwRetry(() => chrome.tabs.create({
+          url,
+          active: false,
+        }));
       }
       await new Promise(r => setTimeout(r, 500));
-      
-      // Try to detach any existing debugger first
       try {
         await chrome.debugger.detach({ tabId: tab.id });
-      } catch (e) {
-        // Ignore - no debugger attached
-      }
-      
-      const { targetInfo } = await attachTab(tab.id);
+      } catch (e) {}
+      const { targetInfo } = await withSwRetry(() => attachTab(tab.id));
       return { targetId: targetInfo.targetId };
     }
     
@@ -354,14 +380,14 @@ async function handleCDP({ method, params, sessionId }) {
           }
           
           // Notify relay
-          if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
+          if (relayConnected()) {
+            relaySend({
               method: 'forwardCDPEvent',
               params: {
                 method: 'Target.targetDestroyed',
                 params: { targetId }
               }
-            }));
+            })
           }
           return { success: true };
         } catch (e) {
@@ -438,7 +464,7 @@ async function handleCDP({ method, params, sessionId }) {
 async function attachTab(tabId) {
   console.log('[glider] Attempting to attach tab:', tabId);
   try {
-    await chrome.debugger.attach({ tabId }, '1.3');
+    await withSwRetry(() => chrome.debugger.attach({ tabId }, '1.3'));
     console.log('[glider] Debugger attached to tab:', tabId);
   } catch (e) {
     console.log('[glider] Attach failed:', e.message);
@@ -460,14 +486,14 @@ async function attachTab(tabId) {
   const sessionId = `session-${nextSessionId++}`;
   connectedTabs.set(tabId, { sessionId, targetId: targetInfo.targetId });
   
-  if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
+  if (relayConnected()) {
+    relaySend({
       method: 'forwardCDPEvent',
       params: {
         method: 'Target.attachedToTarget',
         params: { sessionId, targetInfo: { ...targetInfo, attached: true }, waitingForDebugger: false }
       }
-    }));
+    })
   }
   
   updateIcon();
@@ -480,14 +506,14 @@ function detachTab(tabId) {
   const info = connectedTabs.get(tabId);
   if (!info) return;
   
-  if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
+  if (relayConnected()) {
+    relaySend({
       method: 'forwardCDPEvent',
       params: {
         method: 'Target.detachedFromTarget',
         params: { sessionId: info.sessionId, targetId: info.targetId }
       }
-    }));
+    })
   }
   
   connectedTabs.delete(tabId);
@@ -499,14 +525,14 @@ function detachTab(tabId) {
 
 function updateIcon() {
   const n = connectedTabs.size;
-  const ok = ws?.readyState === WebSocket.OPEN;
+  const ok = relayConnected();
   chrome.action.setBadgeText({ text: n > 0 ? String(n) : (ok ? '' : '!') });
   chrome.action.setBadgeBackgroundColor({ color: n > 0 ? '#22c55e' : (ok ? '#64748b' : '#ef4444') });
 }
 
 chrome.debugger.onEvent.addListener((src, method, params) => {
   const info = connectedTabs.get(src.tabId);
-  if (!info || ws?.readyState !== WebSocket.OPEN) return;
+  if (!info || !relayConnected()) return;
 
   // OOPIF-PATCH: intercept child attach/detach events (params.sessionId identifies child)
   // and forward under the CHILD's sessionId so client-side session routing works.
@@ -524,34 +550,34 @@ chrome.debugger.onEvent.addListener((src, method, params) => {
     // top-level sessionId so client-side sees "browser-level" attached event -
     // matches CDP flatten semantics: attach events for children are emitted at the
     // parent session level with params.sessionId identifying the new child.
-    ws.send(JSON.stringify({
+    relaySend({
       method: 'forwardCDPEvent',
       params: { sessionId: info.sessionId, method, params }
-    }));
+    })
     return;
   }
 
   if (method === 'Target.detachedFromTarget' && childSid) {
     childSessions.delete(childSid);
-    ws.send(JSON.stringify({
+    relaySend({
       method: 'forwardCDPEvent',
       params: { sessionId: info.sessionId, method, params }
-    }));
+    })
     return;
   }
 
   // OOPIF-PATCH: for events emitted from within a CHILD session (Network.*, Runtime.*),
   // chrome.debugger sets src.sessionId. Route those under the child sessionId.
   if (src.sessionId && childSessions.has(src.sessionId)) {
-    ws.send(JSON.stringify({
+    relaySend({
       method: 'forwardCDPEvent',
       params: { sessionId: src.sessionId, method, params }
-    }));
+    })
     return;
   }
 
   // Default: forward under parent tab's sessionId (existing behavior)
-  ws.send(JSON.stringify({ method: 'forwardCDPEvent', params: { sessionId: info.sessionId, method, params } }));
+  relaySend({ method: 'forwardCDPEvent', params: { sessionId: info.sessionId, method, params } })
 });
 
 chrome.debugger.onDetach.addListener((src) => {
@@ -572,7 +598,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // Ensure at least one tab is always connected
 async function ensureConnected() {
-  if (ws?.readyState !== WebSocket.OPEN) return;
+  if (!relayConnected()) return;
   if (connectedTabs.size > 0) return; // Already have a connection
   
   console.log('[glider] No tabs connected, auto-attaching...');
@@ -604,26 +630,26 @@ chrome.action.onClicked.addListener(async (tab) => {
 connect();
 // setupOffscreen called via onInstalled/onStartup listeners
 
-// More aggressive reconnect - check every 3 seconds
+// Keep service worker alive - Chrome suspends inactive workers (~30s).
+// Alarms wake SW in background with zero focus/tab mutation (Chrome docs + OpenClaw pattern).
+chrome.alarms.create('keepalive', { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== 'keepalive') return;
+  // Extension API poke resets idle timer even if WS is already open.
+  chrome.runtime.getPlatformInfo().catch(() => {});
+  setupOffscreen().catch(() => {});
+  if (!relayConnected()) connect();
+});
+
+// Top-level reconnect: setInterval dies with SW; alarms survive. Keep a short interval
+// only while the worker is alive; alarms restart the loop after suspension.
 setInterval(() => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
+  if (!relayConnected()) {
     connect();
   } else if (connectedTabs.size === 0) {
-    // WebSocket is connected but no tabs - auto-attach
     autoAttachActiveTab();
   }
 }, 3000);
-
-// Keep service worker alive - Chrome suspends inactive workers
-chrome.alarms.create('keepalive', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'keepalive') {
-    // Just accessing ws keeps the worker alive
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ method: 'ping' }));
-    }
-  }
-});
 
 // Auto-attach to active tab when relay connects
 async function autoAttachActiveTab() {
@@ -683,7 +709,7 @@ async function persistAttachedUrls() {
 
 // Also auto-attach when switching tabs (optional aggressive mode)
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  if (ws?.readyState !== WebSocket.OPEN) return;
+  if (!relayConnected()) return;
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
     if (tab && !isBrowserInternalUrl(tab.url)) {
@@ -697,7 +723,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 
 // Auto-attach when new tabs are created (if we have no connections)
 chrome.tabs.onCreated.addListener(async (tab) => {
-  if (ws?.readyState !== WebSocket.OPEN) return;
+  if (!relayConnected()) return;
   if (connectedTabs.size > 0) return; // Already have connections
   
   // Wait for tab to load
@@ -715,7 +741,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 // When a tab finishes loading, check if we need to attach
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete') return;
-  if (ws?.readyState !== WebSocket.OPEN) return;
+  if (!relayConnected()) return;
   if (connectedTabs.size > 0) return; // Already have connections
   
   if (tab && !isBrowserInternalUrl(tab.url)) {

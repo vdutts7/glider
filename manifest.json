@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Glider",
-  "version": "1.0.6",
+  "version": "1.0.9",
+  "minimum_chrome_version": "116",
   "description": "Connect browser tabs to your local development environment.",
   "author": "vd7",
   "homepage_url": "https://github.com/vdutts7/glider",
@@ -11,7 +12,8 @@
     "activeTab",
     "offscreen",
     "alarms",
-    "cookies"
+    "cookies",
+    "storage"
   ],
   "host_permissions": [
     "<all_urls>"
