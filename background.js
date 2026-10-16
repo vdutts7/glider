@@ -100,31 +100,43 @@ function connect() {
 
 function bindBridgePort(port) {
   bridgePort = port;
-  port.onMessage.addListener(async (msg) => {
-    if (!msg || typeof msg !== 'object') return;
-    if (msg.type === 'keepalive') return;
-    if (msg.type === 'relay-open') {
-      relayOpen = true;
-      updateIcon();
-      await new Promise((r) => setTimeout(r, 300));
-      await autoAttachActiveTab();
-      return;
-    }
-    if (msg.type === 'relay-closed') {
-      relayOpen = false;
-      connectedTabs.clear();
-      updateIcon();
-      return;
-    }
-    if (msg.type === 'relay') {
-      await handleRelayInbound(msg.payload || {});
-    }
+  // Never let a handler rejection surface as "Uncaught (in promise)": the extension
+  // ErrorConsole records those and only a WebUI-side clear removes them.
+  port.onMessage.addListener((msg) => {
+    onBridgeMessage(msg).catch((e) => console.log('[glider] bridge handler failed:', e && e.message));
   });
   port.onDisconnect.addListener(() => {
     if (bridgePort === port) bridgePort = null;
     relayOpen = false;
     updateIcon();
   });
+}
+
+async function onBridgeMessage(msg) {
+  if (!msg || typeof msg !== 'object') return;
+  if (msg.type === 'keepalive') return;
+  if (msg.type === 'relay-open') {
+    relayOpen = true;
+    updateIcon();
+    await new Promise((r) => setTimeout(r, 300));
+    await autoAttachActiveTab();
+    return;
+  }
+  if (msg.type === 'relay-closed') {
+    relayOpen = false;
+    // Relay-side sessionIds die with the socket. Release our debugger sessions too,
+    // otherwise reattach on relay-open fails "already attached" until manual reload.
+    // Bypass detachTab() so persisted URLs survive for restore.
+    const tabIds = [...connectedTabs.keys()];
+    connectedTabs.clear();
+    childSessions.clear();
+    await Promise.all(tabIds.map((tabId) => chrome.debugger.detach({ tabId }).catch(() => {})));
+    updateIcon();
+    return;
+  }
+  if (msg.type === 'relay') {
+    await handleRelayInbound(msg.payload || {});
+  }
 }
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -149,6 +161,39 @@ async function handleRelayInbound(msg) {
       await persistAttachedUrls();
       relaySend({ id: msg.id, result: { reloading: true, persisted: connectedTabs.size } });
       setTimeout(() => { try { chrome.runtime.reload(); } catch (e) {} }, 200);
+    } catch (e) {
+      relaySend({ id: msg.id, error: { message: e.message } });
+    }
+    return;
+  }
+
+  // Discard inactive tabs without removing them from the tab strip.
+  if (msg.method === 'discardHiddenTabs') {
+    let discarded = 0, skipped = 0, failed = 0;
+    try {
+      const tabs = await withSwRetry(() => chrome.tabs.query({}));
+      for (const tab of tabs) {
+        if (!tab?.id || tab.active || tab.discarded || tab.audible || isBrowserInternalUrl(tab.url || '')) {
+          skipped++;
+          continue;
+        }
+        if (connectedTabs.has(tab.id)) {
+          await chrome.debugger.detach({ tabId: tab.id }).catch(() => {});
+          connectedTabs.delete(tab.id);
+        }
+        try {
+          await chrome.tabs.discard(tab.id);
+          discarded++;
+        } catch {
+          failed++;
+        }
+      }
+      await persistAttachedUrls();
+      updateIcon();
+      relaySend({
+        id: msg.id,
+        result: { discarded_count: discarded, skipped_count: skipped, failed_count: failed, total_tabs: tabs.length }
+      });
     } catch (e) {
       relaySend({ id: msg.id, error: { message: e.message } });
     }
@@ -506,8 +551,20 @@ async function attachTab(tabId) {
     await withSwRetry(() => chrome.debugger.attach({ tabId }, '1.3'));
     console.log('[glider] Debugger attached to tab:', tabId);
   } catch (e) {
-    console.log('[glider] Attach failed:', e.message);
-    throw new Error('Could not attach to tab: ' + e.message);
+    // Orphaned session from a prior SW life or relay drop: globals were lost but the
+    // debugger session (owned by this extension) persists. Release and retry once.
+    if (/already attached/i.test(e.message || '') && !connectedTabs.has(tabId)) {
+      await chrome.debugger.detach({ tabId }).catch(() => {});
+      try {
+        await withSwRetry(() => chrome.debugger.attach({ tabId }, '1.3'));
+        console.log('[glider] Reclaimed orphaned debugger session on tab:', tabId);
+      } catch (e2) {
+        throw new Error('Could not attach to tab: ' + e2.message);
+      }
+    } else {
+      console.log('[glider] Attach failed:', e.message);
+      throw new Error('Could not attach to tab: ' + e.message);
+    }
   }
   
   try {
@@ -565,8 +622,8 @@ function detachTab(tabId) {
 function updateIcon() {
   const n = connectedTabs.size;
   const ok = relayConnected();
-  chrome.action.setBadgeText({ text: n > 0 ? String(n) : (ok ? '' : '!') });
-  chrome.action.setBadgeBackgroundColor({ color: n > 0 ? '#22c55e' : (ok ? '#64748b' : '#ef4444') });
+  chrome.action.setBadgeText({ text: n > 0 ? String(n) : (ok ? '' : '!') }).catch(() => {});
+  chrome.action.setBadgeBackgroundColor({ color: n > 0 ? '#22c55e' : (ok ? '#64748b' : '#ef4444') }).catch(() => {});
 }
 
 chrome.debugger.onEvent.addListener((src, method, params) => {

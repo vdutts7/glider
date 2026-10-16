@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Glider",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "minimum_chrome_version": "116",
   "description": "Connect browser tabs to your local development environment.",
   "author": "vd7",

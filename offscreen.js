@@ -51,8 +51,25 @@ function scheduleReconnect() {
   }, delay);
 }
 
+// Blink reports a refused WebSocket via AddConsoleMessage, which the extension
+// ErrorConsole ingests (one chrome://extensions error per retry). A refused fetch
+// is a catchable rejection whose console line stays DevTools-only. Probe first,
+// open the socket only once the relay answers.
+const RELAY_STATUS_URL = RELAY_URL.replace(/^ws/, 'http').replace(/\/extension$/, '/status');
+let probing = false;
+
 function connect() {
   ensurePort();
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  if (probing) return;
+  probing = true;
+  fetch(RELAY_STATUS_URL, { cache: 'no-store' })
+    .then((r) => { if (r.ok) openSocket(); else scheduleReconnect(); })
+    .catch(() => scheduleReconnect())
+    .finally(() => { probing = false; });
+}
+
+function openSocket() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   try {
     ws = new WebSocket(RELAY_URL);
