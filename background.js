@@ -174,8 +174,20 @@ async function handleRelayInbound(msg) {
         highlighted: !!tab.highlighted,
         pinned: !!tab.pinned,
         status: tab.status || '',
+        incognito: !!tab.incognito,
       }));
-      relaySend({ id: msg.id, result: { focusedWindowId, tabs: rows } });
+      let windows = [];
+      try {
+        const wins = await withSwRetry(() => chrome.windows.getAll({}));
+        windows = (wins || []).map((w) => ({
+          windowId: w.id,
+          incognito: !!w.incognito,
+          focused: !!w.focused,
+          type: w.type || '',
+          state: w.state || '',
+        }));
+      } catch (_) {}
+      relaySend({ id: msg.id, result: { focusedWindowId, tabs: rows, windows } });
     } catch (e) {
       relaySend({ id: msg.id, error: { message: e.message } });
     }

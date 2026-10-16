@@ -34,6 +34,7 @@
 - bridge Chrome tabs to local dev tools through **Chrome DevTools Protocol (CDP)**
 - **CDP relay**: connects browser to a local WebSocket server
 - **tab control**: attaches + detaches debugger from any tab
+- **tab catalog**: `listTabs` (`chrome.tabs` + window `incognito`) for [glidercli](https://github.com/vdutts7/glidercli) `glider tabs`
 - **auto reconnect**: survives local relay restarts
 - **persistent runtime**: offscreen document keeps service worker alive
 
