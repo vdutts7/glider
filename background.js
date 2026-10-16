@@ -155,6 +155,33 @@ async function handleRelayInbound(msg) {
     return;
   }
 
+  if (msg.method === 'listTabs') {
+    try {
+      const tabs = await withSwRetry(() => chrome.tabs.query({}));
+      let focusedWindowId = 0;
+      try {
+        const focused = await chrome.windows.getLastFocused();
+        focusedWindowId = focused && focused.id ? focused.id : 0;
+      } catch (_) {}
+      const rows = (tabs || []).map((tab) => ({
+        id: tab.id,
+        windowId: tab.windowId,
+        index: tab.index,
+        title: tab.title || '',
+        url: tab.url || '',
+        active: !!tab.active,
+        discarded: !!tab.discarded,
+        highlighted: !!tab.highlighted,
+        pinned: !!tab.pinned,
+        status: tab.status || '',
+      }));
+      relaySend({ id: msg.id, result: { focusedWindowId, tabs: rows } });
+    } catch (e) {
+      relaySend({ id: msg.id, error: { message: e.message } });
+    }
+    return;
+  }
+
   if (msg.method === 'attachAllTabs') {
     const filter = msg.params?.urlSubstring;
     const perTabTimeoutMs = Number(msg.params?.perTabTimeoutMs) || 5000;
@@ -491,7 +518,7 @@ async function attachTab(tabId) {
       method: 'forwardCDPEvent',
       params: {
         method: 'Target.attachedToTarget',
-        params: { sessionId, targetInfo: { ...targetInfo, attached: true }, waitingForDebugger: false }
+        params: { sessionId, tabId, targetInfo: { ...targetInfo, attached: true, tabId }, waitingForDebugger: false }
       }
     })
   }
