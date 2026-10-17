@@ -226,8 +226,9 @@ async function handleRelayInbound(msg) {
         const wins = await withSwRetry(() => chrome.windows.getAll({}));
         windows = (wins || []).map((w) => ({
           windowId: w.id,
-          incognito: !!w.incognito,
+          id: w.id,
           focused: !!w.focused,
+          incognito: !!w.incognito,
           type: w.type || '',
           state: w.state || '',
         }));
