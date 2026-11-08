@@ -318,10 +318,23 @@ async function handleRelayInbound(msg) {
       if (p.url) query.url = p.url;
       if (p.domain) query.domain = p.domain;
       if (p.name) query.name = p.name;
+      if (p.storeId) query.storeId = p.storeId;
       const cookies = await withSwRetry(() => chrome.cookies.getAll(query));
       response.result = { data: cookies };
     } catch (err) {
       response.error = err.message || 'getCookies failed';
+    }
+    relaySend(response);
+    return;
+  }
+
+  if (msg.method === 'listCookieStores') {
+    const response = { id: msg.id };
+    try {
+      const stores = await withSwRetry(() => chrome.cookies.getAllCookieStores());
+      response.result = { stores };
+    } catch (err) {
+      response.error = err.message || 'listCookieStores failed';
     }
     relaySend(response);
     return;
