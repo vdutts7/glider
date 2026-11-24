@@ -1,3 +1,6 @@
+importScripts('target-identity.js');
+const { syntheticTargetInfo, tryUpgradeSyntheticFromPageAttach } = self.GliderTargetIdentity;
+
 const RELAY_URL = 'ws://localhost:19988/extension';
 // WS lives in offscreen.js; SW talks via persistent port (wakes live chrome.* context).
 let bridgePort = null;
@@ -589,12 +592,27 @@ async function attachTab(tabId) {
   try {
     const result = await chrome.debugger.sendCommand({ tabId }, 'Target.getTargetInfo');
     targetInfo = result.targetInfo;
-  } catch {
-    targetInfo = { targetId: `tab-${tabId}`, url: '', type: 'page' };
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    targetInfo = syntheticTargetInfo(tabId);
+    console.warn('[glider] Target.getTargetInfo failed; using temporary identity:', tabId, message);
+    if (relayConnected()) {
+      relaySend({
+        method: 'log',
+        params: {
+          level: 'warn',
+          args: [`Target.getTargetInfo failed for tab ${tabId}: ${message}; using temporary identity`],
+        },
+      });
+    }
   }
   
   const sessionId = `session-${nextSessionId++}`;
-  connectedTabs.set(tabId, { sessionId, targetId: targetInfo.targetId });
+  connectedTabs.set(tabId, {
+    sessionId,
+    targetId: targetInfo.targetId,
+    synthetic: targetInfo.synthetic === true,
+  });
   
   if (relayConnected()) {
     relaySend({
@@ -650,6 +668,19 @@ chrome.debugger.onEvent.addListener((src, method, params) => {
 
   if (method === 'Target.attachedToTarget' && childSid) {
     const ti = params.targetInfo || {};
+    const upgraded = tryUpgradeSyntheticFromPageAttach(info, ti, src.tabId);
+    if (upgraded) {
+      connectedTabs.set(src.tabId, upgraded.session);
+      relaySend({
+        method: 'forwardCDPEvent',
+        params: {
+          sessionId: upgraded.session.sessionId,
+          method: 'Target.targetInfoChanged',
+          params: upgraded.changedParams,
+        },
+      });
+      return;
+    }
     childSessions.set(childSid, {
       tabId: src.tabId,
       targetId: ti.targetId,

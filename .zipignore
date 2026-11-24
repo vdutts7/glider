@@ -15,3 +15,5 @@ docs
 .glider/*
 *.config.json
 cws-publish-process.json
+tests
+tests/*
