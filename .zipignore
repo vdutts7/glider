@@ -17,3 +17,5 @@ docs
 cws-publish-process.json
 tests
 tests/*
+package.json
+package-lock.json

@@ -23,6 +23,7 @@
     <a href="#usage">Usage</a><br/>
     <a href="#how-it-works">How it works</a><br/>
     <a href="#cli">CLI</a><br/>
+    <a href="#verification">Verification</a><br/>
     <a href="#privacy">Privacy</a><br/>
     <a href="#contact">Contact</a>
 </ol>
@@ -94,6 +95,18 @@ glider screenshot /tmp/page.png
 ```
 
 - see the [glidercli README](https://github.com/vdutts7/glidercli) for full documentation
+
+## Verification
+
+- **CRX unit** (pure helpers only; no Chrome APIs):
+
+```bash
+npm test
+```
+
+- covers `target-identity.js` + `browser-guards.js`
+- CRX↔CLI method map: [`tests/contract-crosswalk.json`](tests/contract-crosswalk.json)
+- **live CRX proof** lives in [glidercli](https://github.com/vdutts7/glidercli): `npm run test:live` + `tests/contract.json` (requires this extension on `:19988`)
 
 ## Privacy
 

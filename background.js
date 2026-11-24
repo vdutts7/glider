@@ -1,5 +1,6 @@
-importScripts('target-identity.js');
+importScripts('target-identity.js', 'browser-guards.js');
 const { syntheticTargetInfo, tryUpgradeSyntheticFromPageAttach } = self.GliderTargetIdentity;
+const { isBrowserInternalUrl, BROWSER_LEVEL_COMMANDS } = self.GliderBrowserGuards;
 
 const RELAY_URL = 'ws://localhost:19988/extension';
 // WS lives in offscreen.js; SW talks via persistent port (wakes live chrome.* context).
@@ -26,17 +27,6 @@ function relaySend(obj) {
 // OOPIF-PATCH v1: track child (OOPIF/worker) sessions spawned by Target.setAutoAttach flatten
 // keyed by child sessionId. Value: { tabId (parent), targetId, targetType }
 let childSessions = new Map();
-
-// VENDOR-AGNOSTIC-PATCH v1: browser-internal URLs are un-attachable regardless of vendor.
-// Chromium forks each ship their own scheme (chrome://, edge://, brave://, opera://,
-// vivaldi://, arc://) plus 'about:' pages. Any attempt to chrome.debugger.attach one
-// throws; we skip them wholesale via this single predicate so vendor-specific literals
-// never sprawl through the codebase.
-function isBrowserInternalUrl(u) {
-  if (!u) return true;
-  if (u.startsWith('about:')) return true;
-  return /^(chrome|chrome-extension|edge|brave|opera|vivaldi|arc):\/\//.test(u);
-}
 
 // Chromium returns literal "No SW" when an extension API is dispatched after the
 // MV3 worker stopped (crbug 341232995). Retry + poke an extension API to revive.
@@ -380,17 +370,8 @@ async function handleRelayInbound(msg) {
 
 
 async function handleCDP({ method, params, sessionId }) {
-  // Browser-level commands that don't need a tab/session
-  const browserLevelCommands = [
-    'Target.createTarget',
-    'Target.closeTarget',
-    'Target.activateTarget',
-    'Target.getTargets',
-    'Target.attachToTarget'
-  ];
-  
   // For browser-level commands, handle without requiring a session
-  if (browserLevelCommands.includes(method)) {
+  if (BROWSER_LEVEL_COMMANDS.includes(method)) {
     if (method === 'Target.attachToTarget') {
       // Find the tab by targetId and return its sessionId
       const targetId = params?.targetId;

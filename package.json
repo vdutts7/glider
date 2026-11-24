@@ -1,0 +1,8 @@
+{
+  "name": "glider",
+  "private": true,
+  "description": "Glider MV3 extension — unit door only (CWS zip ignores tests/)",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}

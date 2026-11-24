@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "id": "glider.crx.contract-crosswalk",
+  "version": "0.1.0",
+  "about": "CRX method/helper coverage vs glidercli tests/contract.json. Missing OK. Broken forbidden. Live proof stays in glidercli npm run test:live.",
+  "cli_contract": "$GLIDERCLI/tests/contract.json",
+  "crx_unit_door": "npm test",
+  "relay_methods": [
+    {
+      "method": "ping",
+      "contract_ids": ["session_liveness_probe"],
+      "unit": "none",
+      "live": "session_liveness_probe",
+      "note": "SW relay handshake; live via CLI"
+    },
+    {
+      "method": "attachActiveTab",
+      "contract_ids": ["relay_cdp_round_trip", "attach_all_tabs"],
+      "unit": "none",
+      "live": "relay_cdp_round_trip",
+      "note": "Needs chrome.debugger; live only"
+    },
+    {
+      "method": "attachAllTabs",
+      "contract_ids": ["attach_all_tabs"],
+      "unit": "none",
+      "live": "attach_all_tabs",
+      "note": "Uses isBrowserInternalUrl skip path"
+    },
+    {
+      "method": "listTabs",
+      "contract_ids": ["scaffold_tabs"],
+      "unit": "none",
+      "live": "deferred",
+      "defer_reason": "scaffold_tabs DEFERRED_NO_TEST on CLI contract"
+    },
+    {
+      "method": "discardHiddenTabs",
+      "contract_ids": ["discard_hidden_tabs"],
+      "unit": "none",
+      "live": "discard_hidden_tabs",
+      "note": "SKIPPED_SAFETY on live; uses isBrowserInternalUrl"
+    },
+    {
+      "method": "reloadSelf",
+      "contract_ids": ["extension_reload_self", "scaffold_reload"],
+      "unit": "none",
+      "live": "extension_reload_self",
+      "note": "PARTIAL on live; scaffold_reload deferred"
+    },
+    {
+      "method": "corsFetch",
+      "contract_ids": ["extension_cors_fetch"],
+      "unit": "none",
+      "live": "extension_cors_fetch"
+    },
+    {
+      "method": "forwardCDPCommand",
+      "contract_ids": ["relay_cdp_round_trip", "run_cdp_on_backgrounded_tab", "auto_thaw"],
+      "unit": "none",
+      "live": "many",
+      "note": "Primary CDP bridge; live matrix covers verbs"
+    },
+    {
+      "method": "getCookies",
+      "contract_ids": ["get_httponly_cookies"],
+      "unit": "none",
+      "live": "get_httponly_cookies"
+    },
+    {
+      "method": "setCookie",
+      "contract_ids": ["set_cookie"],
+      "unit": "none",
+      "live": "set_cookie"
+    },
+    {
+      "method": "removeCookie",
+      "contract_ids": ["delete_cookie"],
+      "unit": "none",
+      "live": "delete_cookie"
+    },
+    {
+      "method": "listCookieStores",
+      "contract_ids": ["scaffold_cookie_jar"],
+      "unit": "none",
+      "live": "deferred",
+      "defer_reason": "scaffold_cookie_jar DEFERRED_NO_TEST"
+    }
+  ],
+  "pure_helpers": [
+    {
+      "helper": "syntheticTargetInfo / tryUpgradeSyntheticFromPageAttach",
+      "file": "target-identity.js",
+      "unit": "tests/target-identity.test.js",
+      "contract_ids": ["relay_cdp_round_trip", "attach_all_tabs"],
+      "note": "Synthetic tab-<id> → real targetId upgrade path"
+    },
+    {
+      "helper": "isBrowserInternalUrl / BROWSER_LEVEL_COMMANDS",
+      "file": "browser-guards.js",
+      "unit": "tests/browser-guards.test.js",
+      "contract_ids": ["attach_all_tabs", "discard_hidden_tabs", "relay_cdp_round_trip"],
+      "note": "Skip chrome:// etc; gate Target.* without session"
+    }
+  ],
+  "deferred_no_crx_unit": {
+    "reason": "chrome.* / debugger APIs need live CRX; unit covers pure predicates only",
+    "contract_ids_live_only": "all required live rows in CLI contract except pure-helper-backed ones above"
+  }
+}
